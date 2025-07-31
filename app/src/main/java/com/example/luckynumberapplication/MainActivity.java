@@ -1,6 +1,10 @@
 package com.example.luckynumberapplication;
 
+import android.content.Intent;
 import android.os.Bundle;
+import android.view.View;
+import android.widget.Button;
+import android.widget.EditText;
 
 import androidx.activity.EdgeToEdge;
 import androidx.appcompat.app.AppCompatActivity;
@@ -21,7 +25,32 @@ public class MainActivity extends AppCompatActivity {
             return insets;
         });
 
+        Button inputButton = findViewById(R.id.guessButton);
+        EditText inputName = findViewById(R.id.inputName);
+
+        inputButton.setOnClickListener(new View.OnClickListener() {
+
+            String name = inputName.getText().toString();
+
+            @Override
+            public void onClick(View v) {
+                goToSecondActivity(name);
+            }
+        });
+
+
+
 
 
     }
+
+
+    public void goToSecondActivity(String name)
+    {
+
+        Intent intent = new Intent(getApplicationContext(),secondActivity.class);
+        intent.putExtra("name",name);
+        startActivity(intent);
+    }
+
 }
