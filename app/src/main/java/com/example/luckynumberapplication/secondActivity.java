@@ -3,11 +3,14 @@ package com.example.luckynumberapplication;
 import android.content.Intent;
 import android.os.Bundle;
 import android.view.Menu;
+import android.view.MenuItem;
 import android.view.View;
 import android.widget.Button;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.activity.EdgeToEdge;
+import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
@@ -58,8 +61,21 @@ public class secondActivity extends AppCompatActivity {
         return true;
     }
 
+    @Override
+    public boolean onOptionsItemSelected(@NonNull MenuItem item) {
+        int itemId = item.getItemId();
+        if(itemId == R.id.actionContact)
+        {
+            Toast.makeText(this,"User Selected Contact option",Toast.LENGTH_LONG).show();
+        }
 
+        if(itemId == R.id.actionSearch)
+        {
+            Toast.makeText(this,"User Selected Search option",Toast.LENGTH_LONG).show();
+        }
 
+        return true;
+    }
 
     public int generateRandomNumber()
     {
