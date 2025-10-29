@@ -4,3 +4,43 @@
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
   </component>
 </project>
+
+package com.imobile3.pos.data.module.batch.report.repository
+
+import android.database.Cursor
+import androidx.annotation.WorkerThread
+import com.imobile3.pos.library.constants.Ids
+import com.imobile3.pos.library.database.transaction.accessObjects.TransactionsDao
+import com.imobile3.pos.library.domainobjects.CartValues
+import com.imobile3.pos.library.domainobjects.TxDbTender
+import com.imobile3.pos.library.domainobjects.TxDbTransaction
+import com.imobile3.pos.library.webservices.filters.TransactionSearchFilter
+import javax.inject.Inject
+
+class BatchReportRepository @Inject constructor(private val dao: TransactionsDao) {
+
+    @WorkerThread
+    fun getTransactions(filter: TransactionSearchFilter): Cursor? {
+        return dao.getTransactions(filter, Ids.UNDEFINED.toLong())
+    }
+
+    @WorkerThread
+    fun getTransactionNumberFromCursor(cursor: Cursor): Long {
+        return dao.getTransactionNumberFromCursor(cursor)
+    }
+
+    @WorkerThread
+    fun getCartValues(transactionNumber: Long): CartValues? {
+        return dao.getCartValues(transactionNumber)
+    }
+
+    @WorkerThread
+    fun getTransactionByTransactionNumber(transactionNumber: Long): TxDbTransaction {
+        return dao.getTransactionByTransactionNumber(transactionNumber)
+    }
+
+    @WorkerThread
+    fun getTenderByTenderNumber(transactionNumber: Long, tenderNumber: Long): TxDbTender? {
+        return dao.getTenderByTenderNumber(transactionNumber, tenderNumber)
+    }
+}
