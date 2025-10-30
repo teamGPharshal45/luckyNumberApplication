@@ -5,42 +5,246 @@
   </component>
 </project>
 
-package com.imobile3.pos.data.module.batch.report.repository
+package com.imobile3.pos.data.module.batch.report;
 
-import android.database.Cursor
-import androidx.annotation.WorkerThread
-import com.imobile3.pos.library.constants.Ids
-import com.imobile3.pos.library.database.transaction.accessObjects.TransactionsDao
-import com.imobile3.pos.library.domainobjects.CartValues
-import com.imobile3.pos.library.domainobjects.TxDbTender
-import com.imobile3.pos.library.domainobjects.TxDbTransaction
-import com.imobile3.pos.library.webservices.filters.TransactionSearchFilter
-import javax.inject.Inject
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 
-class BatchReportRepository @Inject constructor(private val dao: TransactionsDao) {
+import com.imobile3.pos.app.AppLocaleHelper;
+import com.imobile3.pos.library.domainobjects.BatchReport;
+import com.imobile3.pos.library.domainobjects.BatchReportDetailed;
+import com.imobile3.pos.library.domainobjects.BatchReportTender;
+import com.imobile3.pos.library.domainobjects.TxDbBatchTransfer;
+import com.imobile3.pos.library.webservices.enums.PaymentType;
+import com.imobile3.pos.library.webservices.enums.TransferType;
+import com.imobile3.pos.library.webservices.transferobjects.BatchDepositDto;
 
-    @WorkerThread
-    fun getTransactions(filter: TransactionSearchFilter): Cursor? {
-        return dao.getTransactions(filter, Ids.UNDEFINED.toLong())
+import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.List;
+
+public class BatchSummaryReportHelper {
+    /**
+     * All tenders after loading are sorted in the following order and they are assigned with ids
+     * accordingly.
+     * Cash
+     * Amex
+     * Discover
+     * MasterCard
+     * Visa
+     */
+    public final static int CASH_TENDER_ID = 0;
+    public final static int AMEX_TENDER_ID = 1;
+    public final static int DISCOVER_TENDER_ID = 2;
+    public final static int MASTERCARD_TENDER_ID = 3;
+    public final static int VISA_TENDER_ID = 4;
+
+    // Grand total
+    public final static int PAYMENTS_GRAND_TOTAL_INDEX = 0;
+    public final static int DEPOSIT_GRAND_TOTAL_INDEX = 1;
+    public final static int REGISTER_GRAND_TOTAL_INDEX = 2;
+    public final static int OVER_SHORT_GRAND_TOTAL_INDEX = 3;
+
+    // Batch transfers
+    public final static int ORDER_TOTAL_INDEX = 0;
+    public final static int CASH_IN_INDEX = 1;
+    public final static int CASH_OUT_INDEX = 2;
+    public final static int SAFE_DROP_INDEX = 3;
+    public final static int PAID_TIPS_INDEX = 4;
+    public final static int EXPECTED_CASH_INDEX = 5;
+
+    private static List<String> sTendersList;
+    private static List<String> sTendersCountList;
+    private static List<String> sDepositTotalList;
+    private static List<String> sRegisterTotalList;
+    private static List<String> sOverShortList;
+
+    private BatchSummaryReportHelper() {
     }
 
-    @WorkerThread
-    fun getTransactionNumberFromCursor(cursor: Cursor): Long {
-        return dao.getTransactionNumberFromCursor(cursor)
+    public static List<String> getTenderNameList(@NonNull BatchReport batchReport) {
+        sTendersList = new ArrayList<>();
+        getTenderDetails(sTendersList, batchReport, null);
+        return sTendersList;
     }
 
-    @WorkerThread
-    fun getCartValues(transactionNumber: Long): CartValues? {
-        return dao.getCartValues(transactionNumber)
+    public static List<String> getTendersCountList(@NonNull BatchReport batchReport,
+            BatchReportDetailed reportDetailed) {
+        sTendersCountList = new ArrayList<>();
+        getTenderDetails(sTendersCountList, batchReport, reportDetailed);
+        return sTendersCountList;
     }
 
-    @WorkerThread
-    fun getTransactionByTransactionNumber(transactionNumber: Long): TxDbTransaction {
-        return dao.getTransactionByTransactionNumber(transactionNumber)
+    public static List<String> getDepositTotalList(@NonNull BatchReport batchReport) {
+        sDepositTotalList = new ArrayList<>();
+        getTenderDetails(sDepositTotalList, batchReport, null);
+        return sDepositTotalList;
     }
 
-    @WorkerThread
-    fun getTenderByTenderNumber(transactionNumber: Long, tenderNumber: Long): TxDbTender? {
-        return dao.getTenderByTenderNumber(transactionNumber, tenderNumber)
+    public static List<String> getRegisterTotalList(@NonNull BatchReport batchReport) {
+        sRegisterTotalList = new ArrayList<>();
+        getTenderDetails(sRegisterTotalList, batchReport, null);
+        return sRegisterTotalList;
+    }
+
+    public static List<String> getOverShortList(@NonNull BatchReport batchReport) {
+        sOverShortList = new ArrayList<>();
+        getTenderDetails(sOverShortList, batchReport, null);
+        return sOverShortList;
+    }
+
+    private static void getTenderDetails(@NonNull List<String> list,
+            @NonNull BatchReport batchReport, @Nullable BatchReportDetailed reportDetailed) {
+        for (BatchDepositDto deposit : batchReport.getDeposits()) {
+            if (list == sTendersList && deposit.getPaymentType() != null) {
+                list.add(deposit.getPaymentType().name());
+            } else if (list == sTendersCountList) {
+                int paymentsQuantity = 0;
+                if (reportDetailed == null) {
+                    return;
+                }
+                if (reportDetailed.getTenderDetails() == null) {
+                    continue;
+                }
+                for (BatchReportTender tender : reportDetailed.getTenderDetails()) {
+                    if (getPaymentType(tender.getId()) == deposit.getPaymentType()) {
+                        paymentsQuantity = paymentsQuantity + tender.getQuantity();
+                    }
+                }
+                sTendersCountList.add(String.valueOf(paymentsQuantity));
+            } else if (list == sDepositTotalList && deposit.getDepositAmount() != null) {
+                sDepositTotalList.add(formatForDisplay(deposit.getDepositAmount()));
+            } else if (list == sRegisterTotalList && deposit.getTotalAmount() != null) {
+                sRegisterTotalList.add(formatForDisplay(deposit.getTotalAmount()));
+            } else if (list == sOverShortList && deposit.getOverShortAmount() != null) {
+                sOverShortList.add(formatForDisplay(deposit.getOverShortAmount()));
+            }
+        }
+    }
+
+    public static List<BigDecimal> getTotalsList(@NonNull BatchReport batchReport,
+            @NonNull List<TxDbBatchTransfer> batchTransfers) {
+        List<BigDecimal> totalsList = new ArrayList<>();
+        BigDecimal paymentsGrandTotal = BigDecimal.ZERO;
+        BigDecimal depositGrandTotal = BigDecimal.ZERO;
+        BigDecimal registerGrandTotal = BigDecimal.ZERO;
+        BigDecimal overShortGrandTotal = BigDecimal.ZERO;
+        for (BatchDepositDto deposit : batchReport.getDeposits()) {
+            paymentsGrandTotal = paymentsGrandTotal.add(deposit.getAmountReceived());
+            depositGrandTotal = depositGrandTotal.add(deposit.getDepositAmount());
+            registerGrandTotal = registerGrandTotal.add(deposit.getTotalAmount());
+            overShortGrandTotal = overShortGrandTotal.add(deposit.getOverShortAmount());
+        }
+        registerGrandTotal = registerGrandTotal.add(getCashTransferTotal(batchTransfers));
+        totalsList.add((paymentsGrandTotal));
+        totalsList.add((depositGrandTotal));
+        totalsList.add((registerGrandTotal));
+        totalsList.add((overShortGrandTotal));
+
+        return totalsList;
+    }
+
+    public static List<BigDecimal> getBatchTransfersList(@NonNull BatchReport batchReport,
+            @NonNull List<TxDbBatchTransfer> batchTransfers, @NonNull BigDecimal startingCash) {
+        List<BigDecimal> transfersList = new ArrayList<>();
+
+        BigDecimal orderTotal = BigDecimal.ZERO;
+        BigDecimal cashIn = BigDecimal.ZERO;
+        BigDecimal cashOut = BigDecimal.ZERO;
+        BigDecimal safeDrops = BigDecimal.ZERO;
+        BigDecimal paidTips = BigDecimal.ZERO;
+        BigDecimal cashTips = BigDecimal.ZERO;
+
+        if (batchReport.getDeposits() != null) {
+            for (BatchDepositDto deposit : batchReport.getDeposits()) {
+                if (deposit.getPaymentType() == PaymentType.Cash) {
+                    if (deposit.getOrderAmount() != null) {
+                        orderTotal = deposit.getOrderAmount();
+                    }
+
+                    if (deposit.getTipAmount() != null) {
+                        cashTips = deposit.getTipAmount();
+                    }
+                }
+            }
+        }
+
+        BigDecimal expectedCash = startingCash.add(orderTotal).add(cashTips);
+
+        for (TxDbBatchTransfer transfer : batchTransfers) {
+            if (transfer.isDeleted()) continue;
+
+            switch (transfer.getTransferTypeId()) {
+                case CashIn:
+                    cashIn = cashIn.add(transfer.getAmount());
+                    break;
+                case CashOut:
+                    cashOut = cashOut.add(transfer.getAmount());
+                    break;
+                case SafeDrop:
+                    safeDrops = safeDrops.add(transfer.getAmount());
+                    break;
+                case PaidTips:
+                    paidTips = paidTips.add(transfer.getAmount());
+                    break;
+            }
+
+            expectedCash = expectedCash.add(transfer.getAmount());
+        }
+        transfersList.add(orderTotal);
+        transfersList.add(cashIn);
+        transfersList.add(cashOut);
+        transfersList.add(safeDrops);
+        transfersList.add(paidTips);
+        transfersList.add(expectedCash);
+
+        return transfersList;
+    }
+
+    private static PaymentType getPaymentType(int tenderId) {
+        if (tenderId == CASH_TENDER_ID) {
+            return PaymentType.Cash;
+        } else if (isCreditCard(tenderId)) {
+            return PaymentType.CreditCard;
+        } else if (PaymentType.fromKey(tenderId) != null) {
+            return PaymentType.fromKey(tenderId);
+        } else {
+            return PaymentType.CustomTender;
+        }
+    }
+
+    private static boolean isCreditCard(int tenderId) {
+        return tenderId == AMEX_TENDER_ID || tenderId == DISCOVER_TENDER_ID || tenderId ==
+                MASTERCARD_TENDER_ID ||
+                tenderId == VISA_TENDER_ID;
+    }
+
+    public static String formatForDisplay(BigDecimal value) {
+        return AppLocaleHelper.getCurrencyManager().formatForDisplay(true, value);
+    }
+
+    @NonNull
+    public static String getPaymentsTotal(@NonNull BatchReportDetailed detailedReport,
+            @NonNull BatchReport batchReport) {
+        int totalCount = 0;
+        List<String> paymentsCount = getTendersCountList(batchReport, detailedReport);
+        for (String count : paymentsCount) {
+            totalCount += Integer.parseInt(count);
+        }
+        return String.valueOf(totalCount);
+    }
+
+    /**
+     * Get cash transfer totals of a batch.
+     */
+    @NonNull
+    public static BigDecimal getCashTransferTotal(@NonNull List<TxDbBatchTransfer> batchTransfers) {
+        BigDecimal registerTotal = BigDecimal.ZERO;
+        for (TxDbBatchTransfer transfer : batchTransfers) {
+            if (transfer.getTransferTypeId() != TransferType.SafeDrop && !transfer.isDeleted()) {
+                registerTotal = registerTotal.add(transfer.getAmount());
+            }
+        }
+        return registerTotal;
     }
 }
