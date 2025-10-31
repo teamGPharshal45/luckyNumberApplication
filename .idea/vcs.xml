@@ -5,246 +5,337 @@
   </component>
 </project>
 
-package com.imobile3.pos.data.module.batch.report;
+package com.imobile3.pos.app
 
-import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
+import android.annotation.SuppressLint
+import android.content.Context
+import android.content.res.Configuration
+import android.content.res.Resources
+import android.os.Build.VERSION
+import android.os.Build.VERSION_CODES
+import com.imobile3.pos.BuildConfig
+import com.imobile3.pos.MainApplication
+import com.imobile3.pos.app.constants.PrefKeys
+import com.imobile3.pos.data.flavor.FlavorHelper
+import com.imobile3.pos.data.module.account.config.AccountConfigHelper
+import com.imobile3.pos.data.module.receipt.ReceiptRules
+import com.imobile3.pos.data.preferences.PrefHelper
+import com.imobile3.pos.library.constants.enums.AppLocale
+import com.imobile3.pos.library.domainobjects.Cart
+import com.imobile3.pos.library.domainobjects.calculation.CartRoundingMode
+import com.imobile3.pos.library.environment.EnvironmentManager
+import com.imobile3.pos.library.environment.EnvironmentManager.Attributes
+import com.imobile3.pos.library.extensions.isNullOrEmpty
+import com.imobile3.pos.library.utils.CurrencyManager
+import com.imobile3.pos.library.utils.LocaleHelper
+import org.apache.commons.lang3.LocaleUtils
+import java.util.Locale
 
-import com.imobile3.pos.app.AppLocaleHelper;
-import com.imobile3.pos.library.domainobjects.BatchReport;
-import com.imobile3.pos.library.domainobjects.BatchReportDetailed;
-import com.imobile3.pos.library.domainobjects.BatchReportTender;
-import com.imobile3.pos.library.domainobjects.TxDbBatchTransfer;
-import com.imobile3.pos.library.webservices.enums.PaymentType;
-import com.imobile3.pos.library.webservices.enums.TransferType;
-import com.imobile3.pos.library.webservices.transferobjects.BatchDepositDto;
+@SuppressLint("StaticFieldLeak")
+object AppLocaleHelper {
 
-import java.math.BigDecimal;
-import java.util.ArrayList;
-import java.util.List;
+    const val TAG: String = "AppLocaleHelper"
 
-public class BatchSummaryReportHelper {
+    private var context: Context? = null
+    private var currencyLocale: Locale? = null
+    private var currencyManager: CurrencyManager? = null
+    private val DEFAULT_ROUNDING_MODE = CartRoundingMode.Traditional
+
     /**
-     * All tenders after loading are sorted in the following order and they are assigned with ids
-     * accordingly.
-     * Cash
-     * Amex
-     * Discover
-     * MasterCard
-     * Visa
+     * Gives access to the localized instance of Resources.
+     *
+     * @return The localized instance of [resources].
      */
-    public final static int CASH_TENDER_ID = 0;
-    public final static int AMEX_TENDER_ID = 1;
-    public final static int DISCOVER_TENDER_ID = 2;
-    public final static int MASTERCARD_TENDER_ID = 3;
-    public final static int VISA_TENDER_ID = 4;
+    @JvmStatic
+    val resources: Resources
+        get() = getContext().resources
 
-    // Grand total
-    public final static int PAYMENTS_GRAND_TOTAL_INDEX = 0;
-    public final static int DEPOSIT_GRAND_TOTAL_INDEX = 1;
-    public final static int REGISTER_GRAND_TOTAL_INDEX = 2;
-    public final static int OVER_SHORT_GRAND_TOTAL_INDEX = 3;
+    /**
+     * @return False if there is no language selected by the user yet.
+     * That means that the application is freshly installed and the language selection
+     * should be the first screen displayed when the app starts.
+     */
+    @JvmStatic
+    val isAnyLanguageSelected: Boolean
+        get() = PrefHelper.get(PrefKeys.APP_LOCALE, null) != null
 
-    // Batch transfers
-    public final static int ORDER_TOTAL_INDEX = 0;
-    public final static int CASH_IN_INDEX = 1;
-    public final static int CASH_OUT_INDEX = 2;
-    public final static int SAFE_DROP_INDEX = 3;
-    public final static int PAID_TIPS_INDEX = 4;
-    public final static int EXPECTED_CASH_INDEX = 5;
-
-    private static List<String> sTendersList;
-    private static List<String> sTendersCountList;
-    private static List<String> sDepositTotalList;
-    private static List<String> sRegisterTotalList;
-    private static List<String> sOverShortList;
-
-    private BatchSummaryReportHelper() {
-    }
-
-    public static List<String> getTenderNameList(@NonNull BatchReport batchReport) {
-        sTendersList = new ArrayList<>();
-        getTenderDetails(sTendersList, batchReport, null);
-        return sTendersList;
-    }
-
-    public static List<String> getTendersCountList(@NonNull BatchReport batchReport,
-            BatchReportDetailed reportDetailed) {
-        sTendersCountList = new ArrayList<>();
-        getTenderDetails(sTendersCountList, batchReport, reportDetailed);
-        return sTendersCountList;
-    }
-
-    public static List<String> getDepositTotalList(@NonNull BatchReport batchReport) {
-        sDepositTotalList = new ArrayList<>();
-        getTenderDetails(sDepositTotalList, batchReport, null);
-        return sDepositTotalList;
-    }
-
-    public static List<String> getRegisterTotalList(@NonNull BatchReport batchReport) {
-        sRegisterTotalList = new ArrayList<>();
-        getTenderDetails(sRegisterTotalList, batchReport, null);
-        return sRegisterTotalList;
-    }
-
-    public static List<String> getOverShortList(@NonNull BatchReport batchReport) {
-        sOverShortList = new ArrayList<>();
-        getTenderDetails(sOverShortList, batchReport, null);
-        return sOverShortList;
-    }
-
-    private static void getTenderDetails(@NonNull List<String> list,
-            @NonNull BatchReport batchReport, @Nullable BatchReportDetailed reportDetailed) {
-        for (BatchDepositDto deposit : batchReport.getDeposits()) {
-            if (list == sTendersList && deposit.getPaymentType() != null) {
-                list.add(deposit.getPaymentType().name());
-            } else if (list == sTendersCountList) {
-                int paymentsQuantity = 0;
-                if (reportDetailed == null) {
-                    return;
-                }
-                if (reportDetailed.getTenderDetails() == null) {
-                    continue;
-                }
-                for (BatchReportTender tender : reportDetailed.getTenderDetails()) {
-                    if (getPaymentType(tender.getId()) == deposit.getPaymentType()) {
-                        paymentsQuantity = paymentsQuantity + tender.getQuantity();
-                    }
-                }
-                sTendersCountList.add(String.valueOf(paymentsQuantity));
-            } else if (list == sDepositTotalList && deposit.getDepositAmount() != null) {
-                sDepositTotalList.add(formatForDisplay(deposit.getDepositAmount()));
-            } else if (list == sRegisterTotalList && deposit.getTotalAmount() != null) {
-                sRegisterTotalList.add(formatForDisplay(deposit.getTotalAmount()));
-            } else if (list == sOverShortList && deposit.getOverShortAmount() != null) {
-                sOverShortList.add(formatForDisplay(deposit.getOverShortAmount()));
-            }
-        }
-    }
-
-    public static List<BigDecimal> getTotalsList(@NonNull BatchReport batchReport,
-            @NonNull List<TxDbBatchTransfer> batchTransfers) {
-        List<BigDecimal> totalsList = new ArrayList<>();
-        BigDecimal paymentsGrandTotal = BigDecimal.ZERO;
-        BigDecimal depositGrandTotal = BigDecimal.ZERO;
-        BigDecimal registerGrandTotal = BigDecimal.ZERO;
-        BigDecimal overShortGrandTotal = BigDecimal.ZERO;
-        for (BatchDepositDto deposit : batchReport.getDeposits()) {
-            paymentsGrandTotal = paymentsGrandTotal.add(deposit.getAmountReceived());
-            depositGrandTotal = depositGrandTotal.add(deposit.getDepositAmount());
-            registerGrandTotal = registerGrandTotal.add(deposit.getTotalAmount());
-            overShortGrandTotal = overShortGrandTotal.add(deposit.getOverShortAmount());
-        }
-        registerGrandTotal = registerGrandTotal.add(getCashTransferTotal(batchTransfers));
-        totalsList.add((paymentsGrandTotal));
-        totalsList.add((depositGrandTotal));
-        totalsList.add((registerGrandTotal));
-        totalsList.add((overShortGrandTotal));
-
-        return totalsList;
-    }
-
-    public static List<BigDecimal> getBatchTransfersList(@NonNull BatchReport batchReport,
-            @NonNull List<TxDbBatchTransfer> batchTransfers, @NonNull BigDecimal startingCash) {
-        List<BigDecimal> transfersList = new ArrayList<>();
-
-        BigDecimal orderTotal = BigDecimal.ZERO;
-        BigDecimal cashIn = BigDecimal.ZERO;
-        BigDecimal cashOut = BigDecimal.ZERO;
-        BigDecimal safeDrops = BigDecimal.ZERO;
-        BigDecimal paidTips = BigDecimal.ZERO;
-        BigDecimal cashTips = BigDecimal.ZERO;
-
-        if (batchReport.getDeposits() != null) {
-            for (BatchDepositDto deposit : batchReport.getDeposits()) {
-                if (deposit.getPaymentType() == PaymentType.Cash) {
-                    if (deposit.getOrderAmount() != null) {
-                        orderTotal = deposit.getOrderAmount();
-                    }
-
-                    if (deposit.getTipAmount() != null) {
-                        cashTips = deposit.getTipAmount();
-                    }
-                }
-            }
-        }
-
-        BigDecimal expectedCash = startingCash.add(orderTotal).add(cashTips);
-
-        for (TxDbBatchTransfer transfer : batchTransfers) {
-            if (transfer.isDeleted()) continue;
-
-            switch (transfer.getTransferTypeId()) {
-                case CashIn:
-                    cashIn = cashIn.add(transfer.getAmount());
-                    break;
-                case CashOut:
-                    cashOut = cashOut.add(transfer.getAmount());
-                    break;
-                case SafeDrop:
-                    safeDrops = safeDrops.add(transfer.getAmount());
-                    break;
-                case PaidTips:
-                    paidTips = paidTips.add(transfer.getAmount());
-                    break;
-            }
-
-            expectedCash = expectedCash.add(transfer.getAmount());
-        }
-        transfersList.add(orderTotal);
-        transfersList.add(cashIn);
-        transfersList.add(cashOut);
-        transfersList.add(safeDrops);
-        transfersList.add(paidTips);
-        transfersList.add(expectedCash);
-
-        return transfersList;
-    }
-
-    private static PaymentType getPaymentType(int tenderId) {
-        if (tenderId == CASH_TENDER_ID) {
-            return PaymentType.Cash;
-        } else if (isCreditCard(tenderId)) {
-            return PaymentType.CreditCard;
-        } else if (PaymentType.fromKey(tenderId) != null) {
-            return PaymentType.fromKey(tenderId);
+    @JvmStatic
+    val isMultipleLanguagesSupported: Boolean
+        get() = if (BuildConfig.DEBUG_USE_ALL_LOCALES) {
+            true
         } else {
-            return PaymentType.CustomTender;
+            getAppLocales().size > 1
         }
-    }
 
-    private static boolean isCreditCard(int tenderId) {
-        return tenderId == AMEX_TENDER_ID || tenderId == DISCOVER_TENDER_ID || tenderId ==
-                MASTERCARD_TENDER_ID ||
-                tenderId == VISA_TENDER_ID;
-    }
+    @JvmStatic
+    val validCountryCode: String
+        get() = when {
+            FlavorHelper.isGlobalCanada() -> Locale.CANADA.country
+            FlavorHelper.isGlobalCzech() -> LocaleHelper.LOCALE_CZECH.country
+            FlavorHelper.isGlobalUnitedKingdom() -> Locale.UK.country
+            FlavorHelper.isGlobalSpain() -> LocaleHelper.LOCALE_SPAIN.country
+            FlavorHelper.isGlobalGermany() -> Locale.GERMANY.country
+            FlavorHelper.isGlobalAustria() -> LocaleHelper.LOCALE_AUSTRIA.country
 
-    public static String formatForDisplay(BigDecimal value) {
-        return AppLocaleHelper.getCurrencyManager().formatForDisplay(true, value);
-    }
-
-    @NonNull
-    public static String getPaymentsTotal(@NonNull BatchReportDetailed detailedReport,
-            @NonNull BatchReport batchReport) {
-        int totalCount = 0;
-        List<String> paymentsCount = getTendersCountList(batchReport, detailedReport);
-        for (String count : paymentsCount) {
-            totalCount += Integer.parseInt(count);
+            else -> Locale.US.country
         }
-        return String.valueOf(totalCount);
+
+    @JvmStatic
+    val defaultAppLocale: AppLocale = getAppLocales()[0]
+
+    @JvmStatic
+    val defaultLocale: Locale = defaultAppLocale.locale
+
+    @JvmStatic
+    fun initDefault() = setAppLocale(defaultAppLocale)
+
+    /**
+     * @param newLocale that will be used to build a new localized [Resources].
+     */
+    @JvmStatic
+    fun setAppLocale(newLocale: AppLocale) {
+        saveAppLocale(newLocale.locale)
+        context = getLocalizedContext(newLocale.locale)
+        updateCurrencyLocale(newLocale.locale)
+        updateEnvironmentManager(newLocale.locale, currencyLocale)
+    }
+
+    @JvmStatic
+    @JvmOverloads
+    fun updateCurrencyLocale(
+        locale: Locale,
+        currencyCode: String = AccountConfigHelper.getCurrencyCode()
+    ) {
+        currencyLocale = locale
+        currencyManager = CurrencyManager(
+            currencyLocale as Locale,
+            fallbackToUSEnglish = true,
+            DEFAULT_ROUNDING_MODE
+        )
+        updateCurrency(currencyCode)
+    }
+
+    @JvmStatic
+    fun updateCurrency(currencyCode: String) {
+        currencyManager?.clearDecimalFormatCache()
+        currencyManager?.updateCurrency(currencyCode)
+    }
+
+    @JvmStatic
+    fun getCurrencySymbol(): String = getCurrencyManager().getCurrencySymbol().orEmpty()
+
+    private fun updateEnvironmentManager(locale: Locale?, currencyLocale: Locale?) {
+        val attrs = Attributes()
+        attrs.setLocale(locale)
+        attrs.setCurrencyLocale(currencyLocale)
+        attrs.setRoundingMode(DEFAULT_ROUNDING_MODE)
+        EnvironmentManager.getInstance().init(attrs)
     }
 
     /**
-     * Get cash transfer totals of a batch.
+     * Return the context with the updated locale selected in the application.
+     *
+     * @return The localized instance of [AppLocaleHelper.context].
+     *
+     * @see  com.imobile3.pos.data.di.localized
      */
-    @NonNull
-    public static BigDecimal getCashTransferTotal(@NonNull List<TxDbBatchTransfer> batchTransfers) {
-        BigDecimal registerTotal = BigDecimal.ZERO;
-        for (TxDbBatchTransfer transfer : batchTransfers) {
-            if (transfer.getTransferTypeId() != TransferType.SafeDrop && !transfer.isDeleted()) {
-                registerTotal = registerTotal.add(transfer.getAmount());
+    @JvmStatic
+    fun getContext(): Context {
+        if (context == null) {
+            context = getLocalizedContext(getCurrentLocale())
+        }
+
+        return context as Context
+    }
+
+    private fun getLocalizedContext(desiredLocale: Locale): Context {
+        // The JVM default Locale is used by the WebView to specify the accept-language.
+        Locale.setDefault(desiredLocale)
+        return LocaleHelper.getLocalizedContext(MainApplication.getInstance(), desiredLocale)
+    }
+
+    /**
+     * Update the base context with app locale.
+     *
+     * @return A [Context] with the given configuration override.
+     */
+    @JvmStatic
+    fun getUpdatedBaseContextByAppLocale(context: Context): Context =
+        LocaleHelper.getLocalizedContext(context, getCurrentLocale())
+
+    /**
+     * @return current Locale which was set in [saveAppLocale] or first Locale from
+     * [BuildConfig.APP_LOCALES] if Locale was not set.
+     */
+    @JvmStatic
+    fun getCurrentLocale(): Locale = getCurrentLocale(defaultLocale)
+
+    /**
+     * @param fallback language tag
+     * @return current Locale which was set in [saveAppLocale]
+     */
+    @JvmStatic
+    fun getCurrentLocale(fallback: Locale): Locale {
+        val appLocale =
+            PrefHelper.get(PrefKeys.APP_LOCALE, fallback.toLanguageTag()) ?: return fallback
+
+        return LocaleHelper.fromLanguageTag(appLocale)
+    }
+
+    @JvmStatic
+    fun getCurrencyLocale(): Locale {
+        if (currencyLocale == null) {
+            updateCurrencyLocale(getCurrentLocale())
+        }
+
+        return currencyLocale as Locale
+    }
+
+    /**
+     * @return A list of [AppLocale] of all supported locales that can be used for the Receipt
+     * selection screen.
+     */
+    @JvmStatic
+    fun getPrioritizedAppLocales(preferredLocales: List<Locale>?): MutableList<AppLocale> {
+        val currentLocale: AppLocale? = AppLocale.fromLocale(getCurrentLocale())
+
+        val prioritizedAppLocales = mutableListOf<AppLocale>()
+        val flavorAppLocales = getAppLocales()
+        val preferredAppLocales = toAppLocales(preferredLocales)
+
+        for (preferredAppLocale in preferredAppLocales) {
+            // Add preferred locale in its respective priority
+            if (preferredAppLocale in flavorAppLocales) {
+                prioritizedAppLocales.add(preferredAppLocale)
+
+                // At end of traversal, flavorAppLocales will hold any remaining Locales
+                // that should be added to end of the final list.
+                flavorAppLocales.remove(preferredAppLocale)
             }
         }
-        return registerTotal;
+
+        // Adds currentAppLocale to prioritized locales
+        if (currentLocale != null && currentLocale in flavorAppLocales) {
+            prioritizedAppLocales.add(currentLocale)
+            flavorAppLocales.remove(currentLocale)
+        }
+
+        // Check if there are any remaining AppLocales and add them to end of final list.
+        if (flavorAppLocales.isNotEmpty()) {
+            prioritizedAppLocales.addAll(flavorAppLocales)
+        }
+
+        return prioritizedAppLocales
+    }
+
+    /**
+     * Converts a list of [Locale] to a list of [AppLocale].
+     */
+    private fun toAppLocales(listLocale: List<Locale>?): MutableList<AppLocale> {
+        if (listLocale.isNullOrEmpty()) return mutableListOf()
+
+        val listAppLocale = mutableListOf<AppLocale>()
+
+        listLocale?.forEach { locale ->
+            val appLocale = AppLocale.fromLocale(locale)
+            if (appLocale != null) {
+                listAppLocale.add(appLocale)
+            }
+        }
+
+        return listAppLocale
+    }
+
+    /**
+     * Converts a list of [String] to a list of [Locale].
+     */
+    @JvmStatic
+    fun toLocales(listLocale: List<String>?): MutableList<Locale> {
+        if (listLocale.isNullOrEmpty()) return mutableListOf()
+
+        val listLocales = mutableListOf<Locale>()
+
+        listLocale?.forEach { localeCode ->
+            val locale = LocaleUtils.toLocale(localeCode)
+            if (locale != null) {
+                listLocales.add(locale)
+            }
+        }
+
+        return listLocales
+    }
+
+    /**
+     * @return a list of supported locales for each flavor.
+     */
+    @JvmStatic
+    fun getAppLocales(): MutableList<AppLocale> {
+        if (BuildConfig.DEBUG_USE_ALL_LOCALES) {
+            return AppLocale.values().toMutableList()
+        }
+
+        return BuildConfig.APP_LOCALES.toMutableList()
+    }
+
+    /**
+     * Gives access to the localized instance of CurrencyManager.
+     *
+     * @return The localized instance of [AppLocaleHelper.currencyManager].
+     */
+    @JvmStatic
+    open fun getCurrencyManager(): CurrencyManager {
+        if (currencyManager == null) {
+            currencyManager = CurrencyManager.getInstance(getCurrencyLocale())
+        }
+
+        return currencyManager as CurrencyManager
+    }
+
+    /**
+     * Extract the Transaction Receipt Language from Cart If value is null will return default
+     * "en-US".
+     */
+    @JvmStatic
+    fun getReceiptPreferredLanguage(cart: Cart?): String {
+        if (cart == null || cart.transactionReceiptLanguage.isNullOrEmpty()) {
+            return ReceiptRules.getReceiptDefaultPreferredLanguage()
+        }
+
+        return cart.transactionReceiptLanguage
+    }
+
+    private fun saveAppLocale(locale: Locale) {
+        PrefHelper.set(PrefKeys.APP_LOCALE, LocaleHelper.toLanguageTag(locale))
+    }
+
+    /**
+     * Checks if the [getCurrentLocale] is different from locale used by specific context.
+     *
+     * [Configuration.locale] is deprecated starting with API 24,
+     * [Configuration.getLocales.get] will return the used locale from context.
+     */
+    @JvmStatic
+    fun hasLocaleChanged(context: Context): Boolean {
+        val configuration = context.resources.configuration
+        val locale = if (VERSION.SDK_INT >= VERSION_CODES.N) {
+            val localeList = configuration.locales
+            if (localeList.isEmpty) return false
+
+            localeList[0]
+        } else {
+            configuration.locale
+        }
+
+        return locale != getCurrentLocale()
+    }
+
+    /**
+     * Return true if US english is supported in flavor
+     */
+    fun containsUSEnglishLanguage(locales: List<AppLocale>) =
+        locales.any { it.locale == Locale.US }
+
+    fun getAppLocalesExceptUS(locales: List<AppLocale>): MutableList<AppLocale> {
+        return locales.filter { it.locale != Locale.US }.toMutableList()
     }
 }
