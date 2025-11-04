@@ -5,337 +5,49 @@
   </component>
 </project>
 
-package com.imobile3.pos.app
+package com.imobile3.pos.data.module.batch.report
 
-import android.annotation.SuppressLint
-import android.content.Context
-import android.content.res.Configuration
-import android.content.res.Resources
-import android.os.Build.VERSION
-import android.os.Build.VERSION_CODES
-import com.imobile3.pos.BuildConfig
-import com.imobile3.pos.MainApplication
-import com.imobile3.pos.app.constants.PrefKeys
-import com.imobile3.pos.data.flavor.FlavorHelper
-import com.imobile3.pos.data.module.account.config.AccountConfigHelper
-import com.imobile3.pos.data.module.receipt.ReceiptRules
-import com.imobile3.pos.data.preferences.PrefHelper
-import com.imobile3.pos.library.constants.enums.AppLocale
-import com.imobile3.pos.library.domainobjects.Cart
-import com.imobile3.pos.library.domainobjects.calculation.CartRoundingMode
-import com.imobile3.pos.library.environment.EnvironmentManager
-import com.imobile3.pos.library.environment.EnvironmentManager.Attributes
-import com.imobile3.pos.library.extensions.isNullOrEmpty
+import com.imobile3.pos.app.AppLocaleHelper
+import com.imobile3.pos.app.extensions.formatForDisplay
+import com.imobile3.pos.app.extensions.isZero
+import com.imobile3.pos.app.extensions.orZeroIfNull
+import com.imobile3.pos.data.module.order.rules.MathRules
+import com.imobile3.pos.library.domainobjects.BatchReportDetailed
+import com.imobile3.pos.library.utils.CartTaxHelper
 import com.imobile3.pos.library.utils.CurrencyManager
-import com.imobile3.pos.library.utils.LocaleHelper
-import org.apache.commons.lang3.LocaleUtils
-import java.util.Locale
+import com.imobile3.pos.library.utils.FormatHelper
+import java.math.BigDecimal
 
-@SuppressLint("StaticFieldLeak")
-object AppLocaleHelper {
-
-    const val TAG: String = "AppLocaleHelper"
-
-    private var context: Context? = null
-    private var currencyLocale: Locale? = null
-    private var currencyManager: CurrencyManager? = null
-    private val DEFAULT_ROUNDING_MODE = CartRoundingMode.Traditional
+object BatchReportsHelper {
 
     /**
-     * Gives access to the localized instance of Resources.
-     *
-     * @return The localized instance of [resources].
+     * % of Sales = Non-Cash Tips / Sales
      */
     @JvmStatic
-    val resources: Resources
-        get() = getContext().resources
-
-    /**
-     * @return False if there is no language selected by the user yet.
-     * That means that the application is freshly installed and the language selection
-     * should be the first screen displayed when the app starts.
-     */
-    @JvmStatic
-    val isAnyLanguageSelected: Boolean
-        get() = PrefHelper.get(PrefKeys.APP_LOCALE, null) != null
-
-    @JvmStatic
-    val isMultipleLanguagesSupported: Boolean
-        get() = if (BuildConfig.DEBUG_USE_ALL_LOCALES) {
-            true
-        } else {
-            getAppLocales().size > 1
-        }
-
-    @JvmStatic
-    val validCountryCode: String
-        get() = when {
-            FlavorHelper.isGlobalCanada() -> Locale.CANADA.country
-            FlavorHelper.isGlobalCzech() -> LocaleHelper.LOCALE_CZECH.country
-            FlavorHelper.isGlobalUnitedKingdom() -> Locale.UK.country
-            FlavorHelper.isGlobalSpain() -> LocaleHelper.LOCALE_SPAIN.country
-            FlavorHelper.isGlobalGermany() -> Locale.GERMANY.country
-            FlavorHelper.isGlobalAustria() -> LocaleHelper.LOCALE_AUSTRIA.country
-
-            else -> Locale.US.country
-        }
-
-    @JvmStatic
-    val defaultAppLocale: AppLocale = getAppLocales()[0]
-
-    @JvmStatic
-    val defaultLocale: Locale = defaultAppLocale.locale
-
-    @JvmStatic
-    fun initDefault() = setAppLocale(defaultAppLocale)
-
-    /**
-     * @param newLocale that will be used to build a new localized [Resources].
-     */
-    @JvmStatic
-    fun setAppLocale(newLocale: AppLocale) {
-        saveAppLocale(newLocale.locale)
-        context = getLocalizedContext(newLocale.locale)
-        updateCurrencyLocale(newLocale.locale)
-        updateEnvironmentManager(newLocale.locale, currencyLocale)
-    }
-
-    @JvmStatic
-    @JvmOverloads
-    fun updateCurrencyLocale(
-        locale: Locale,
-        currencyCode: String = AccountConfigHelper.getCurrencyCode()
-    ) {
-        currencyLocale = locale
-        currencyManager = CurrencyManager(
-            currencyLocale as Locale,
-            fallbackToUSEnglish = true,
-            DEFAULT_ROUNDING_MODE
-        )
-        updateCurrency(currencyCode)
-    }
-
-    @JvmStatic
-    fun updateCurrency(currencyCode: String) {
-        currencyManager?.clearDecimalFormatCache()
-        currencyManager?.updateCurrency(currencyCode)
-    }
-
-    @JvmStatic
-    fun getCurrencySymbol(): String = getCurrencyManager().getCurrencySymbol().orEmpty()
-
-    private fun updateEnvironmentManager(locale: Locale?, currencyLocale: Locale?) {
-        val attrs = Attributes()
-        attrs.setLocale(locale)
-        attrs.setCurrencyLocale(currencyLocale)
-        attrs.setRoundingMode(DEFAULT_ROUNDING_MODE)
-        EnvironmentManager.getInstance().init(attrs)
-    }
-
-    /**
-     * Return the context with the updated locale selected in the application.
-     *
-     * @return The localized instance of [AppLocaleHelper.context].
-     *
-     * @see  com.imobile3.pos.data.di.localized
-     */
-    @JvmStatic
-    fun getContext(): Context {
-        if (context == null) {
-            context = getLocalizedContext(getCurrentLocale())
-        }
-
-        return context as Context
-    }
-
-    private fun getLocalizedContext(desiredLocale: Locale): Context {
-        // The JVM default Locale is used by the WebView to specify the accept-language.
-        Locale.setDefault(desiredLocale)
-        return LocaleHelper.getLocalizedContext(MainApplication.getInstance(), desiredLocale)
-    }
-
-    /**
-     * Update the base context with app locale.
-     *
-     * @return A [Context] with the given configuration override.
-     */
-    @JvmStatic
-    fun getUpdatedBaseContextByAppLocale(context: Context): Context =
-        LocaleHelper.getLocalizedContext(context, getCurrentLocale())
-
-    /**
-     * @return current Locale which was set in [saveAppLocale] or first Locale from
-     * [BuildConfig.APP_LOCALES] if Locale was not set.
-     */
-    @JvmStatic
-    fun getCurrentLocale(): Locale = getCurrentLocale(defaultLocale)
-
-    /**
-     * @param fallback language tag
-     * @return current Locale which was set in [saveAppLocale]
-     */
-    @JvmStatic
-    fun getCurrentLocale(fallback: Locale): Locale {
-        val appLocale =
-            PrefHelper.get(PrefKeys.APP_LOCALE, fallback.toLanguageTag()) ?: return fallback
-
-        return LocaleHelper.fromLanguageTag(appLocale)
-    }
-
-    @JvmStatic
-    fun getCurrencyLocale(): Locale {
-        if (currencyLocale == null) {
-            updateCurrencyLocale(getCurrentLocale())
-        }
-
-        return currencyLocale as Locale
-    }
-
-    /**
-     * @return A list of [AppLocale] of all supported locales that can be used for the Receipt
-     * selection screen.
-     */
-    @JvmStatic
-    fun getPrioritizedAppLocales(preferredLocales: List<Locale>?): MutableList<AppLocale> {
-        val currentLocale: AppLocale? = AppLocale.fromLocale(getCurrentLocale())
-
-        val prioritizedAppLocales = mutableListOf<AppLocale>()
-        val flavorAppLocales = getAppLocales()
-        val preferredAppLocales = toAppLocales(preferredLocales)
-
-        for (preferredAppLocale in preferredAppLocales) {
-            // Add preferred locale in its respective priority
-            if (preferredAppLocale in flavorAppLocales) {
-                prioritizedAppLocales.add(preferredAppLocale)
-
-                // At end of traversal, flavorAppLocales will hold any remaining Locales
-                // that should be added to end of the final list.
-                flavorAppLocales.remove(preferredAppLocale)
+    fun calculateTotalPercentageSales(report: BatchReportDetailed): String? =
+            if (report.grandTotal == null || report.grandTotal?.isZero() == true) {
+                CartTaxHelper.getFormattedTaxRate(BigDecimal.ZERO, true)
+            } else {
+                FormatHelper.formatPercentage(
+                        report.tipTotal.orZeroIfNull().divide(
+                                report.grandTotal,
+                                getCurrencyManager().maxCalculationPrecision,
+                                getCurrencyManager().roundingStyle))
             }
-        }
-
-        // Adds currentAppLocale to prioritized locales
-        if (currentLocale != null && currentLocale in flavorAppLocales) {
-            prioritizedAppLocales.add(currentLocale)
-            flavorAppLocales.remove(currentLocale)
-        }
-
-        // Check if there are any remaining AppLocales and add them to end of final list.
-        if (flavorAppLocales.isNotEmpty()) {
-            prioritizedAppLocales.addAll(flavorAppLocales)
-        }
-
-        return prioritizedAppLocales
-    }
 
     /**
-     * Converts a list of [Locale] to a list of [AppLocale].
-     */
-    private fun toAppLocales(listLocale: List<Locale>?): MutableList<AppLocale> {
-        if (listLocale.isNullOrEmpty()) return mutableListOf()
-
-        val listAppLocale = mutableListOf<AppLocale>()
-
-        listLocale?.forEach { locale ->
-            val appLocale = AppLocale.fromLocale(locale)
-            if (appLocale != null) {
-                listAppLocale.add(appLocale)
-            }
-        }
-
-        return listAppLocale
-    }
-
-    /**
-     * Converts a list of [String] to a list of [Locale].
+     * Total Sales
      */
     @JvmStatic
-    fun toLocales(listLocale: List<String>?): MutableList<Locale> {
-        if (listLocale.isNullOrEmpty()) return mutableListOf()
-
-        val listLocales = mutableListOf<Locale>()
-
-        listLocale?.forEach { localeCode ->
-            val locale = LocaleUtils.toLocale(localeCode)
-            if (locale != null) {
-                listLocales.add(locale)
-            }
-        }
-
-        return listLocales
-    }
+    fun calculateTotalSales(report: BatchReportDetailed): String =
+            MathRules.zeroIfNull(report.grandTotal).formatForDisplay(showSymbol = false)
 
     /**
-     * @return a list of supported locales for each flavor.
+     * Non-Cash Tips
      */
     @JvmStatic
-    fun getAppLocales(): MutableList<AppLocale> {
-        if (BuildConfig.DEBUG_USE_ALL_LOCALES) {
-            return AppLocale.values().toMutableList()
-        }
+    fun calculateNonCashTips(report: BatchReportDetailed): String =
+            MathRules.zeroIfNull(report.tipTotal).formatForDisplay(showSymbol = false)
 
-        return BuildConfig.APP_LOCALES.toMutableList()
-    }
-
-    /**
-     * Gives access to the localized instance of CurrencyManager.
-     *
-     * @return The localized instance of [AppLocaleHelper.currencyManager].
-     */
-    @JvmStatic
-    open fun getCurrencyManager(): CurrencyManager {
-        if (currencyManager == null) {
-            currencyManager = CurrencyManager.getInstance(getCurrencyLocale())
-        }
-
-        return currencyManager as CurrencyManager
-    }
-
-    /**
-     * Extract the Transaction Receipt Language from Cart If value is null will return default
-     * "en-US".
-     */
-    @JvmStatic
-    fun getReceiptPreferredLanguage(cart: Cart?): String {
-        if (cart == null || cart.transactionReceiptLanguage.isNullOrEmpty()) {
-            return ReceiptRules.getReceiptDefaultPreferredLanguage()
-        }
-
-        return cart.transactionReceiptLanguage
-    }
-
-    private fun saveAppLocale(locale: Locale) {
-        PrefHelper.set(PrefKeys.APP_LOCALE, LocaleHelper.toLanguageTag(locale))
-    }
-
-    /**
-     * Checks if the [getCurrentLocale] is different from locale used by specific context.
-     *
-     * [Configuration.locale] is deprecated starting with API 24,
-     * [Configuration.getLocales.get] will return the used locale from context.
-     */
-    @JvmStatic
-    fun hasLocaleChanged(context: Context): Boolean {
-        val configuration = context.resources.configuration
-        val locale = if (VERSION.SDK_INT >= VERSION_CODES.N) {
-            val localeList = configuration.locales
-            if (localeList.isEmpty) return false
-
-            localeList[0]
-        } else {
-            configuration.locale
-        }
-
-        return locale != getCurrentLocale()
-    }
-
-    /**
-     * Return true if US english is supported in flavor
-     */
-    fun containsUSEnglishLanguage(locales: List<AppLocale>) =
-        locales.any { it.locale == Locale.US }
-
-    fun getAppLocalesExceptUS(locales: List<AppLocale>): MutableList<AppLocale> {
-        return locales.filter { it.locale != Locale.US }.toMutableList()
-    }
+    private fun getCurrencyManager(): CurrencyManager = AppLocaleHelper.getCurrencyManager()
 }
