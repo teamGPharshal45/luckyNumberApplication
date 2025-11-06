@@ -7,3 +7,742 @@
     <option name="id" value="Android" />
   </component>
 </project>
+
+
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PosAndroid Dashboard</title>
+    <link href="style.css" rel="stylesheet" />
+    <!-- Chart.js -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+
+<body>
+
+    <header>
+        <h1>PosAndroid JaCoCo Coverage Dashboard</h1>
+    </header>
+
+    <div id="loader">
+        <div class="spinner"></div>
+        <p>Please wait, loading data...</p>
+    </div>
+
+    <div class="breadcrumb" id="breadcrumb">Home</div>
+
+    <div class="tabs">
+        <div class="tab active" onclick="filterTab('all', event)">All Packages</div>
+        <div class="tab" onclick="filterTab('top', event)">Top Performers</div>
+        <div class="tab" onclick="filterTab('attention', event)">Needs Attention</div>
+    </div>
+
+    <div id="summary"></div>
+    <div id="alert"></div>
+
+    <div class="charts-column">
+
+        <div class="small-chart">
+            <canvas id="packageChart" width="220" height="140"></canvas>
+            <p>Package Status</p>
+        </div>
+        
+        <div class="small-chart">
+            <canvas id="averageChart" width="220" height="140"></canvas>
+            <p>Average Coverage</p>
+        </div>
+    </div>
+
+    <div class="search-container">
+        <input type="text" id="searchBox" placeholder="Search..." />
+    </div>
+
+    <div id="table-container"></div>
+
+    <script src="script.js"></script>
+</body>
+
+</html>
+
+
+let packageData = [], classData = [], methodData = [], summaryData = [];
+let currentPackage = null, currentClass = null;
+let currentTab = 'all';
+let currentSort = { key: null, order: 'asc' };
+let currentLevel = 'package';    
+let currentViewData = [];          
+let charts = {};                  
+
+
+// ================= CSV Loader =================
+async function loadCSV(file) {
+    const res = await fetch(file);
+    const text = await res.text();
+    const rows = text.split('\n').filter(r => r.trim() !== '');
+    if (rows.length === 0) return [];
+    const headers = rows[0].split(',').map(h => h.trim());
+    return rows.slice(1).map(row => {
+        const cols = row.split(',');
+        let obj = {};
+        headers.forEach((h, i) => obj[h] = (cols[i] ?? '').trim());
+        return obj;
+    });
+}
+
+// ================= Helper Functions =================
+function getCoverageClass(status = '') {
+    switch (status.toLowerCase()) {
+        case 'critical': return 'critical';
+        case 'poor': return 'poor';
+        case 'fair': return 'fair';
+        case 'good': return 'good';
+        case 'excellent': return 'excellent';
+        default: return '';
+    }
+}
+
+function showAlert(status = '') {
+    const alertDiv = document.getElementById('alert');
+    if (!status) { alertDiv.innerHTML = ''; return; }
+    if (status.toLowerCase() === 'critical') {
+        alertDiv.innerHTML = `<div class="alert alert-critical">⚠ Critical coverage! Add unit tests immediately.</div>`;
+    } else if (status.toLowerCase() === 'poor') {
+        alertDiv.innerHTML = `<div class="alert alert-poor">⚠ Poor coverage! Consider adding more tests.</div>`;
+    } else {
+        alertDiv.innerHTML = '';
+    }
+}
+
+function updateBreadcrumb() {
+    const bc = document.getElementById('breadcrumb');
+    let html = `<span onclick="goHome()">Home</span>`;
+    if (currentPackage) html += ` &gt; <span onclick="showPackage()">${currentPackage}</span>`;
+    if (currentClass) html += ` &gt; <span onclick="showClass()">${currentClass}</span>`;
+    bc.innerHTML = html;
+}
+
+function filterTab(tab, evt) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    if (evt && evt.target) evt.target.classList.add('active');
+    currentTab = tab;
+    goHome();
+}
+
+function findFieldKey(obj, regex) {
+    if (!obj) return null;
+    const keys = Object.keys(obj);
+    for (let k of keys) {
+        if (regex.test(k)) return k;
+    }
+    return null;
+}
+
+function parseNumberSafe(val) {
+    if (val == null || val === '') return 0;
+    const n = Number(String(val).replace(/[^0-9.-]+/g, ''));
+    return isNaN(n) ? 0 : n;
+}
+
+// Sorting and filtering
+function applySearchFilter(data) {
+    const query = document.getElementById('searchBox').value.toLowerCase().trim();
+    if (!query) return data;
+    return data.filter(row => Object.values(row).some(val => String(val || '').toLowerCase().includes(query)));
+}
+
+
+// sorting the data as per 
+function sortData(data, key) {
+    if (!key) return data;
+    if (currentSort.key === key) {
+        currentSort.order = currentSort.order === 'asc' ? 'desc' : 'asc';
+    } else {
+        currentSort.key = key;
+        currentSort.order = 'asc';
+    }
+    const ord = currentSort.order === 'asc' ? 1 : -1;
+    return data.sort((a, b) => {
+        const x = a[key] ?? '';
+        const y = b[key] ?? '';
+        const xn = parseNumberSafe(x);
+        const yn = parseNumberSafe(y);
+        if (xn !== 0 || yn !== 0) {
+            return (xn - yn) * ord;
+        }
+        return String(x).localeCompare(String(y)) * ord;
+    });
+}
+
+// stats
+function computeStats(data) {
+    const coveredKey = findFieldKey(data[0] || {}, /covered\s*instructions?/i) || findFieldKey(data[0] || {}, /covered/i);
+    const missedKey = findFieldKey(data[0] || {}, /missed\s*instructions?/i) || findFieldKey(data[0] || {}, /missed/i);
+    const instructionKey = findFieldKey(data[0] || {}, /instruction\s*coverage/i) || findFieldKey(data[0] || {}, /instruction/i);
+    const branchKey = findFieldKey(data[0] || {}, /branch\s*coverage/i) || findFieldKey(data[0] || {}, /branch/i);
+
+    let totalCovered = 0, totalMissed = 0;
+    let instrSum = 0, branchSum = 0, count = data.length || 0;
+
+    data.forEach(d => {
+        totalCovered += parseNumberSafe(d[coveredKey]);
+        totalMissed += parseNumberSafe(d[missedKey]);
+        instrSum += parseNumberSafe(d[instructionKey]);
+        branchSum += parseNumberSafe(d[branchKey]);
+    });
+
+    const totalCoverage = (totalCovered + totalMissed) > 0 ? ((totalCovered / (totalCovered + totalMissed)) * 100) : 0;
+    const avgInstruction = count > 0 ? (instrSum / count) : 0;
+    const avgBranch = count > 0 ? (branchSum / count) : 0;
+
+    return {
+        totalCovered, totalMissed,
+        totalCoverage: Number(totalCoverage.toFixed(2)),
+        avgInstruction: Number(avgInstruction.toFixed(2)),
+        avgBranch: Number(avgBranch.toFixed(2))
+    };
+}
+
+
+
+
+// summary rendering on top
+function renderSummary() {
+    const summary = document.getElementById('summary');
+    summary.innerHTML = '';
+
+    const totalPackages = packageData.length;
+    const totalClasses = classData.length;
+    const criticalPackages = packageData.filter(p => String(p['Status'] || '').toLowerCase() === 'critical').length;
+
+    // ✅ Use summary.csv for totalCoverage
+    let overallStats = { totalCoverage: 0, avgInstruction: 0, avgBranch: 0 };
+    if (summaryData[0]) {
+        overallStats = {
+            totalCovered: parseNumberSafe(summaryData[0]['Covered Instructions']),
+            totalMissed: parseNumberSafe(summaryData[0]['Missed Instructions']),
+            totalCoverage: parseNumberSafe(summaryData[0]['Total Coverage (%)']) || 0,
+            avgInstruction: parseNumberSafe(summaryData[0]['Instruction Coverage (%)']) || 0,
+            avgBranch: parseNumberSafe(summaryData[0]['Branch Coverage (%)']) || 0
+        };
+    }
+
+    const cards = [
+        { title: 'Total Packages', value: totalPackages },
+        { title: 'Total Classes', value: totalClasses },
+        { title: 'Critical Packages', value: criticalPackages },
+        { title: 'Total Project Coverage', value: overallStats.totalCoverage.toFixed(2) + '%' }
+    ];
+
+    cards.forEach(c => {
+        const div = document.createElement('div');
+        div.className = 'card';
+        div.innerHTML = `<p>${c.title}</p><h4>${c.value}</h4>`;
+        summary.appendChild(div);
+    });
+
+    // charts
+    const chartBase =
+        currentLevel === 'package' && currentPackage ? classData.filter(c => c['Package'] === currentPackage) :
+        currentLevel === 'class' && currentClass ? methodData.filter(m => m['Package'] === currentPackage && m['Class (with extension)'] === currentClass) :
+        packageData;
+
+    renderSmallCharts(chartBase);
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// pie charts for the coverage
+function renderSmallCharts(baseData) {
+    baseData = Array.isArray(baseData) ? baseData : (packageData || []);
+
+    const stats = computeStats(baseData);
+
+    // Package status distribution
+    const pkgData = (currentLevel === 'package' && currentPackage) ? classData.filter(c => c['Package'] === currentPackage) : packageData;
+    const statuses = ['Critical', 'Poor', 'Fair', 'Good', 'Excellent'];
+    const counts = statuses.map(s => pkgData.filter(p => String(p['Status'] || '').toLowerCase() === s.toLowerCase()).length);
+    const totalCoverage = summaryData[0] ? parseNumberSafe(summaryData[0]['Total Coverage (%)']) : 0;
+
+    // destroy previous charts
+    Object.values(charts).forEach(c => { try { c.destroy(); } catch (e) {} });
+    charts = {};
+
+    // check if chart canvas exist
+    if (document.getElementById('packageChart')) {
+        const pkgCtx = document.getElementById('packageChart').getContext('2d');
+        charts.package = new Chart(pkgCtx, { type: 'pie', data: { labels: statuses, datasets: [{ data: counts, backgroundColor: ['#e53935','#fb8c00','#fbc02d','#43a047','#009688'] }] }, options: { plugins: { legend: { display: false } }, maintainAspectRatio: false } });
+    }
+
+    if (document.getElementById('averageChart')) {
+        const avgCtx = document.getElementById('averageChart').getContext('2d');
+        charts.average = new Chart(avgCtx, { type: 'pie', data: { labels: ['Total Coverage','Remaining'], datasets: [{ data: [totalCoverage, Math.max(0,100-totalCoverage)], backgroundColor: ['#5c6bc0','#c5cae9'] }] }, options: { plugins: { legend: { display: false } }, maintainAspectRatio: false } });
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// ================= Render Table =================
+function renderTable(data, level) {
+    currentLevel = level;
+    currentViewData = data;
+    const container = document.getElementById('table-container');
+    container.innerHTML = '';
+
+    // tab filter at package level
+    if (level === 'package') {
+        if (currentTab === 'top') data = data.filter(p => parseNumberSafe(p['Instruction Coverage (%)']) >= 80);
+        else if (currentTab === 'attention') data = data.filter(p => parseNumberSafe(p['Instruction Coverage (%)']) < 40);
+    }
+
+    data = applySearchFilter(data);
+
+    if (!data.length) { container.innerHTML = '<p style="text-align:center;">No data to display</p>'; return; }
+
+    const table = document.createElement('table');
+    const thead = document.createElement('thead');
+    const headerRow = document.createElement('tr');
+    const keys = Object.keys(data[0]);
+
+    keys.forEach(h => {
+        const th = document.createElement('th');
+        th.innerText = h;
+        th.addEventListener('click', () => {
+            data = sortData(data, h);
+            renderTable(data, level);
+            document.querySelectorAll('th').forEach(header => header.classList.remove('sort-asc','sort-desc'));
+            th.classList.add(currentSort.order === 'asc' ? 'sort-asc' : 'sort-desc');
+        });
+        headerRow.appendChild(th);
+    });
+    thead.appendChild(headerRow);
+    table.appendChild(thead);
+
+    const tbody = document.createElement('tbody');
+    data.forEach(row => {
+        const tr = document.createElement('tr');
+        keys.forEach(key => {
+            const td = document.createElement('td');
+            const val = row[key] ?? '';
+            if (key.toLowerCase().includes('coverage')) {
+                const numeric = parseNumberSafe(val);
+                td.innerHTML = `<div class="progress-container"><div class="progress-bar ${getCoverageClass(row['Status']||'')}" style="width:${numeric}%">${numeric}%</div></div>`;
+            } else td.innerText = val;
+            tr.appendChild(td);
+        });
+
+        // drill-down click
+        if (level === 'package') {
+            tr.addEventListener('click', () => {
+                currentPackage = row['Package'];
+                currentClass = null;
+                const filtered = classData.filter(c => c['Package'] === currentPackage);
+                updateBreadcrumb();
+                renderSummary();
+                renderTable(filtered, 'class');
+            });
+        } else if (level === 'class') {
+            tr.addEventListener('click', () => {
+                currentClass = row['Class (with extension)'] || row['Class'] || row['ClassName'];
+                const filtered = methodData.filter(m => m['Package'] === currentPackage && (m['Class (with extension)'] === currentClass || m['Class'] === currentClass));
+                updateBreadcrumb();
+                renderSummary();
+                renderTable(filtered, 'method');
+            });
+        }
+
+        tbody.appendChild(tr);
+    });
+
+    table.appendChild(tbody);
+    container.appendChild(table);
+}
+
+// ================= Navigation =================
+function goHome() {
+    currentPackage = null;
+    currentClass = null;
+    updateBreadcrumb();
+    renderSummary();
+    renderTable(packageData, 'package');
+}
+
+function showPackage() {
+    if (!currentPackage) return;
+    const filtered = classData.filter(c => c['Package'] === currentPackage);
+    renderSummary();
+    renderTable(filtered, 'class');
+}
+
+function showClass() {
+    if (!currentPackage || !currentClass) return;
+    const filtered = methodData.filter(m => m['Package'] === currentPackage && (m['Class (with extension)'] === currentClass || m['Class'] === currentClass));
+    renderSummary();
+    renderTable(filtered, 'method');
+}
+
+// ================= Init =================
+async function init() {
+    const loader = document.getElementById('loader');
+    if (loader) loader.style.display = 'flex';
+
+    try {
+        packageData = await loadCSV('package_report.csv');
+        classData = await loadCSV('class_report.csv');
+        methodData = await loadCSV('method_report.csv');
+        summaryData = await loadCSV('summary.csv');
+
+        renderSummary();
+        renderTable(packageData, 'package');
+
+        document.getElementById('searchBox').addEventListener('input', () => {
+            const q = document.getElementById('searchBox').value.toLowerCase().trim();
+            let filtered = [];
+            if (currentLevel === 'package') {
+                filtered = packageData.filter(p => Object.values(p).some(v => String(v||'').toLowerCase().includes(q)));
+                renderTable(filtered, 'package');
+            } else if (currentLevel === 'class') {
+                filtered = classData.filter(c => c['Package']===currentPackage && Object.values(c).some(v=>String(v||'').toLowerCase().includes(q)));
+                renderTable(filtered, 'class');
+            } else if (currentLevel === 'method') {
+                filtered = methodData.filter(m => m['Package']===currentPackage && (m['Class (with extension)']===currentClass||m['Class']===currentClass) && Object.values(m).some(v=>String(v||'').toLowerCase().includes(q)));
+                renderTable(filtered, 'method');
+            }
+        });
+    } catch (error) {
+        console.error("Error loading CSVs:", error);
+        document.getElementById('table-container').innerHTML = '<p style="text-align:center;color:red;">Error loading data.</p>';
+    } finally {
+        if (loader) loader.style.display = 'none';
+    }
+}
+
+init();
+
+
+
+
+body {
+  font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+  background-color: #f4f5fa;
+  margin: 0;
+  padding: 0;
+  color: #222;
+}
+
+.container {
+  width: 90%;
+  max-width: 1200px;
+  margin: 2rem auto;
+}
+
+
+header {
+    background: #1976d2;
+    color: white;
+    text-align: center;
+    padding: 1rem;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.2);
+}
+
+h1 {
+  text-align: center;
+  color: #3c4b64;
+}
+
+.breadcrumb {
+    padding: 0.75rem 1rem;
+    color: #555;
+    font-size: 0.9rem;
+}
+
+.breadcrumb span {
+    cursor: pointer;
+    color: #1976d2;
+    margin-right: 5px;
+}
+
+.breadcrumb span:hover {
+    text-decoration: underline;
+}
+
+/* Tabs */
+.tabs {
+    display: flex;
+    justify-content: center;
+    gap: 1rem;
+    margin: 1rem 0;
+}
+
+.tab {
+    background: white;
+    padding: 0.5rem 1rem;
+    border-radius: 8px;
+    cursor: pointer;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+    transition: background 0.2s, transform 0.2s;
+}
+
+.tab.active {
+    background: #1976d2;
+    color: white;
+    transform: translateY(-2px);
+}
+
+#summary {
+  display: flex;
+  justify-content: space-around;
+  flex-wrap: wrap;
+  margin-bottom: 2rem;
+}
+
+.card {
+  text-align: center;
+}
+
+
+
+.card:hover {
+    transform: translateY(-3px);
+}
+
+.card h2 {
+    margin: 0.25rem 0;
+    font-size: 2rem;
+}
+
+.card p {
+  font-size: 1.5rem;
+  color: #0078d7;
+}
+
+
+
+
+.charts-column {
+    width: 95%;
+    max-width: 1200px;
+    margin: 0.25rem auto;
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    justify-content: center;
+}
+
+.small-chart {
+    background: white;
+    border-radius: 10px;
+    padding: 12px;
+    box-shadow: 0 3px 6px rgba(0,0,0,0.06);
+    text-align: center;
+    width: 260px;
+}
+
+/* Search */
+.search-container {
+    width: 95%;
+    margin: 0.5rem auto;
+    text-align: right;
+}
+
+.search-container input {
+    padding: 0.5rem;
+    width: 250px;
+    border-radius: 8px;
+    border: 1px solid #ccc;
+    margin-bottom: 0.5rem;
+}
+
+table {
+    width: 95%;
+    margin: 1rem auto;
+    border-collapse: collapse;
+    background: white;
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+}
+
+th, td {
+    padding: 0.75rem 1rem;
+    text-align: left;
+}
+
+th {
+    background: #1976d2;
+    color: white;
+    position: sticky;
+    top: 0;
+    cursor: pointer;
+}
+
+tr:hover {
+    background: #e3f2fd;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+th.sort-asc::after {
+    content: " ▲";
+    font-size: 0.8rem;
+}
+
+th.sort-desc::after {
+    content: " ▼";
+    font-size: 0.8rem;
+}
+
+/* --- PROGRESS BAR STYLING --- */
+.progress-container {
+    background: #f0f0f0;
+    border-radius: 12px;
+    height: 16px;
+    overflow: hidden;
+    box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+
+.progress-bar {
+    height: 100%;
+    border-radius: 12px;
+    transition: width 0.6s ease;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    padding-left: 20px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+/* --- PROGRESS LEVEL COLORS --- */
+.critical {
+    background: linear-gradient(90deg, #e53935, #b71c1c);
+}
+
+.poor {
+    background: linear-gradient(90deg, #fb8c00, #ef6c00);
+}
+
+.fair {
+    background: linear-gradient(90deg, #fbc02d, #f9a825);
+    color: #333;
+    text-shadow: none;
+}
+
+.good {
+    background: linear-gradient(90deg, #43a047, #2e7d32);
+}
+
+.excellent {
+    background: linear-gradient(90deg, #009688, #00695c);
+}
+
+#loader {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  background: rgba(255,255,255,0.9);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  font-size: 1.2rem;
+  color: #1976d2;
+  z-index: 9999;
+}
+
+.spinner {
+  border: 4px solid #e0e0e0;
+  border-top: 4px solid #1976d2;
+  border-radius: 50%;
+  width: 45px;
+  height: 45px;
+  animation: spin 1s linear infinite;
+  margin-bottom: 15px;
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+.alert {
+    width: 95%;
+    margin: 1rem auto;
+    padding: 1rem;
+    border-radius: 10px;
+    color: white;
+    font-weight: bold;
+    text-align: center;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.alert-critical {
+    background: #d32f2f;
+}
+
+.alert-poor {
+    background: #f57c00;
+}
+
+@media(max-width: 768px) {
+    th, td {
+        padding: 0.5rem;
+        font-size: 0.85rem;
+    }
+
+    .search-container input {
+        width: 100%;
+    }
+
+    .charts-column {
+        flex-direction: column;
+        align-items: center;
+    }
+
+    .small-chart { width: 95%; }
+}
+
+.chart-section {
+  background-color: #fff;
+  border-radius: 12px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+  padding: 1.5rem;
+  margin-bottom: 2rem;
+}
+
+canvas {
+  max-width: 100%;
+  height: 400px !important;
+}
+
+
+
+
