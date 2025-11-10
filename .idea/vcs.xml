@@ -4,50 +4,245 @@
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
   </component>
 </project>
+package com.imobile3.pos.data.module.batch.report;
 
-package com.imobile3.pos.data.module.batch.report
+import android.content.Context;
+import android.database.Cursor;
+import android.util.SparseArray;
 
-import com.imobile3.pos.app.AppLocaleHelper
-import com.imobile3.pos.app.extensions.formatForDisplay
-import com.imobile3.pos.app.extensions.isZero
-import com.imobile3.pos.app.extensions.orZeroIfNull
-import com.imobile3.pos.data.module.order.rules.MathRules
-import com.imobile3.pos.library.domainobjects.BatchReportDetailed
-import com.imobile3.pos.library.utils.CartTaxHelper
-import com.imobile3.pos.library.utils.CurrencyManager
-import com.imobile3.pos.library.utils.FormatHelper
-import java.math.BigDecimal
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+import androidx.annotation.WorkerThread;
 
-object BatchReportsHelper {
+import com.imobile3.pos.data.async.BaseAsyncTaskLoader;
+import com.imobile3.pos.data.module.batch.BatchHelper;
+import com.imobile3.pos.data.module.order.cart.tender.TenderHelper;
+import com.imobile3.pos.library.constants.enums.CvmResult;
+import com.imobile3.pos.library.database.transaction.accessObjects.TransactionsDao;
+import com.imobile3.pos.library.domainobjects.BatchReport;
+import com.imobile3.pos.library.domainobjects.TxDbTender;
+import com.imobile3.pos.library.domainobjects.TxDbTransaction;
+import com.imobile3.pos.library.utils.LogHelper;
+import com.imobile3.pos.library.webservices.enums.PaymentType;
+import com.imobile3.pos.library.webservices.enums.TenderCreditStatusType;
+import com.imobile3.pos.library.webservices.enums.TenderStatusType;
+import com.imobile3.pos.library.webservices.enums.TenderType;
+import com.imobile3.pos.library.webservices.enums.TransactionStatusType;
+import com.imobile3.pos.library.webservices.transferobjects.BatchDepositDto;
+import com.imobile3.pos.library.webservices.transferobjects.CustomTenderFieldsDto;
+
+import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.logging.Level;
+
+public class BatchReportLoader extends BaseAsyncTaskLoader<List<BatchSummaryResponse>> {
+    public static final String TAG = "BatchReportLoader";
+    private TransactionsDao mDao;
+    private final List<Long> mBatchNumbers;
+    private BatchReport mReport;
+
+    public BatchReportLoader(Context context, List<Long> batchNumbers) {
+        super(context);
+        mBatchNumbers = batchNumbers;
+    }
+
+    @Override
+    public List<BatchSummaryResponse> loadInBackground() {
+        if (mDao == null) {
+            mDao = new TransactionsDao(APP);
+        }
+
+        List<BatchSummaryResponse> responseList = new ArrayList<>();
+
+        for (long batchNumber : mBatchNumbers) {
+            BatchSummaryResponse response = new BatchSummaryResponse();
+            response.setBatchNumber(batchNumber);
+            response.setBatchReport(getBatchReport(batchNumber));
+            responseList.add(response);
+        }
+
+        return responseList;
+    }
 
     /**
-     * % of Sales = Non-Cash Tips / Sales
+     * @deprecated This logic was migrated to {@link GetBatchSummaryListWithReportsUseCase},
+     * function {@code getBatchReport(String, long)}.
      */
-    @JvmStatic
-    fun calculateTotalPercentageSales(report: BatchReportDetailed): String? =
-            if (report.grandTotal == null || report.grandTotal?.isZero() == true) {
-                CartTaxHelper.getFormattedTaxRate(BigDecimal.ZERO, true)
+    @Deprecated
+    @WorkerThread
+    private BatchReport getBatchReport(long batchNumber) {
+        mReport = new BatchReport();
+        Cursor cursor = mDao.getTransactions(batchNumber);
+
+        try {
+            if (cursor.moveToFirst()) {
+                do {
+                    TxDbTransaction transaction = mDao.getTxDbTransactionFromCursor(cursor);
+                    TransactionStatusType status = transaction.getTransactionStatusType();
+
+                    if (!(status.equals(TransactionStatusType.Cancelled)
+                            || status.equals(TransactionStatusType.Pending))) {
+                        generateDeposits(mDao.getTendersByTransactionNumber(
+                                transaction.getTransactionNumber()));
+                        generateUserTipTotal(transaction);
+                    }
+                } while (cursor.moveToNext());
             } else {
-                FormatHelper.formatPercentage(
-                        report.tipTotal.orZeroIfNull().divide(
-                                report.grandTotal,
-                                getCurrencyManager().maxCalculationPrecision,
-                                getCurrencyManager().roundingStyle))
+                cursor.close();
+                return mReport;
+            }
+        } catch (Exception e) {
+            LogHelper.write(TAG, e);
+        }
+
+        cursor.close();
+
+        removeZeroTotalDeposits();
+        return mReport;
+    }
+
+    /**
+     * Removes all {@link  BatchDepositDto} from mReport with TotalAmount zero
+     */
+    private void removeZeroTotalDeposits() {
+        List<BatchDepositDto> deposits = new ArrayList<>();
+        for (BatchDepositDto deposit : mReport.getDeposits()) {
+            if (deposit.getTotalAmount().signum() != 0) {
+                deposits.add(deposit);
+            }
+        }
+        mReport.setDeposits(deposits);
+    }
+
+    private void generateDeposits(@Nullable List<TxDbTender> tenders) {
+        if (tenders == null) {
+            LogHelper.writeWithTrace(Level.WARNING, TAG, "Tenders argument is null");
+            return;
+        }
+
+        for (TxDbTender tender : tenders) {
+            TenderStatusType status = tender.getTenderStatusType();
+            TenderType type = tender.getTenderType();
+
+            if (!TenderHelper.isTenderStatusTypeValid(status)) {
+                continue;
             }
 
-    /**
-     * Total Sales
-     */
-    @JvmStatic
-    fun calculateTotalSales(report: BatchReportDetailed): String =
-            MathRules.zeroIfNull(report.grandTotal).formatForDisplay(showSymbol = false)
+            // Don't include non authorized tenders that were removed prior to completion of the
+            // transaction
+            if (TenderHelper.isNonAuthTender(tender) && TenderHelper.isCancelled(tender)) {
+                continue;
+            }
 
-    /**
-     * Non-Cash Tips
-     */
-    @JvmStatic
-    fun calculateNonCashTips(report: BatchReportDetailed): String =
-            MathRules.zeroIfNull(report.tipTotal).formatForDisplay(showSymbol = false)
+            // Don't include voided non authorised tenders like Cash, Checks in calculations
+            if (TenderHelper.isNonAuthTender(tender) && TenderHelper.isVoided(tender)) {
+                continue;
+            }
 
-    private fun getCurrencyManager(): CurrencyManager = AppLocaleHelper.getCurrencyManager()
+            // Don't include tenders that failed to void
+            if (TenderHelper.isFailedToVoid(tender)) {
+                continue;
+            }
+
+            // Update Initial Tip Adjust Tender Count
+            if ((type == TenderType.Normal || type == TenderType.Split) &&
+                    (status.equals(TenderStatusType.Completed) ||
+                            status.equals(TenderStatusType.RefundedItems)) &&
+                    tender.getPaymentType() == PaymentType.CreditCard &&
+                    tender.getTenderCreditStatusType() == TenderCreditStatusType.Authorized &&
+                    tender.getCvmResult() != CvmResult.PinOnline &&
+                    tender.getCvmResult() != CvmResult.PinOfflinePlain &&
+                    tender.getCvmResult() != CvmResult.PinOfflineEncr &&
+                    tender.getCvmResult() != null
+            ) {
+                mReport.setTipAdjustTenderCount(mReport.getTipAdjustTenderCount() + 1);
+            }
+
+            // Create/Update Deposit
+            // MULTIPLE Custom Tender Batch Deposits will be created to keep track of the specific
+            // custom tender details
+            BatchDepositDto depositToAdjust = null;
+            boolean addDeposit = true;
+            for (BatchDepositDto deposit : mReport.getDeposits()) {
+                if (deposit.getPaymentType().equals(tender.getPaymentType())) {
+                    // Custom Tenders
+                    if (deposit.getPaymentType().equals(PaymentType.CustomTender)) {
+                        CustomTenderFieldsDto customFields = BatchHelper.getCustomTenderFieldsDto(deposit);
+                        if (customFields.getCustomTenderId()
+                                .equals(tender.getCustomFields().getCustomTenderId())) {
+                            depositToAdjust = deposit;
+                            addDeposit = false;
+                            break;
+                        }
+                    }
+                    // All other tenders
+                    else {
+                        depositToAdjust = deposit;
+                        addDeposit = false;
+                        break;
+                    }
+                }
+            }
+
+            if (depositToAdjust == null) {
+                depositToAdjust = new BatchDepositDto();
+                depositToAdjust.setPaymentType(tender.getPaymentType());
+                depositToAdjust.setOrderAmount(BigDecimal.ZERO);
+                depositToAdjust.setTipAmount(BigDecimal.ZERO);
+                depositToAdjust.setChangeAmount(BigDecimal.ZERO);
+                depositToAdjust.setTotalAmount(BigDecimal.ZERO); // Expected
+                depositToAdjust.setAmountReceived(BigDecimal.ZERO);
+                depositToAdjust.setDepositAmount(BigDecimal.ZERO); // Actual
+                depositToAdjust
+                        .setOverShortAmount(BigDecimal.ZERO); // Difference (Actual - Expected)
+            }
+
+            if (tender.getOrderAmount() != null) {
+                depositToAdjust.setOrderAmount(
+                        depositToAdjust.getOrderAmount().add(tender.getOrderAmount()));
+            }
+            if (tender.getTipAmount() != null) {
+                depositToAdjust
+                        .setTipAmount(depositToAdjust.getTipAmount().add(tender.getTipAmount()));
+            }
+            if (tender.getChangeAmount() != null) {
+                depositToAdjust.setChangeAmount(
+                        depositToAdjust.getChangeAmount().add(tender.getChangeAmount()));
+            }
+            if (tender.getTotalAmount() != null) {
+                depositToAdjust.setTotalAmount(
+                        depositToAdjust.getTotalAmount().add(tender.getTotalAmount()));
+            }
+            if (tender.getAmountReceived() != null) {
+                depositToAdjust.setAmountReceived(
+                        depositToAdjust.getAmountReceived().add(tender.getAmountReceived()));
+            }
+            if (tender.getCustomFields() != null) {
+                depositToAdjust.setCustomTenderFields(tender.getCustomFields().toJson());
+            }
+
+            if (addDeposit) {
+                LogHelper.writeWithTrace(Level.FINE, TAG,
+                        "Adding deposit to Batch Report: " + depositToAdjust);
+                mReport.addDeposit(depositToAdjust);
+            }
+        }
+    }
+
+    private void generateUserTipTotal(@NonNull TxDbTransaction transaction) {
+        SparseArray<BigDecimal> userTipTotalMap = mReport.getUserTipTotalMap();
+
+        int userId = transaction.getUserId();
+        BigDecimal tipTotal =
+                transaction.getTotalTips() != null ? transaction.getTotalTips() : BigDecimal.ZERO;
+
+        if (userTipTotalMap.get(userId) == null) { // New Entry
+            userTipTotalMap.put(userId, tipTotal);
+        } else { // Existing Entry : Add previous value to new value
+            userTipTotalMap.put(userId, userTipTotalMap.get(userId).add(tipTotal));
+        }
+
+        mReport.setUserTipTotalMap(userTipTotalMap);
+    }
 }
